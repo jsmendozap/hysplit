@@ -80,17 +80,3 @@ cat("../../../output/\n", file = file, append = TRUE)
 # Output filename
 cat("trajectories\n", file = file, append = TRUE)
 
-
-######### Visualizing results #############
-
-raw <- readLines("tdump")
-end <- grep("PRESSURE", raw)
-
-df <- read.table("tdump", skip = end, header = FALSE)
-
-colnames(df) <- c("traj_id", "grid_id", "year", "month", "day", "hour", 
-                  "minute", "forecast", "age", "lat", "lon", "alt", "pres", "sphu")
-
-result <- st_as_sf(df, coords = c("lon", "lat"), crs = 4326)
-qgis$insert_layer(result, 'trajectories')
-
