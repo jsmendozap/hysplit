@@ -40,24 +40,14 @@ if [ -z "$KEY" ]; then
   exit 1
 fi
 
-# --- 1. Download ERA5 data --------------------------------------------
-if [ "$DOWNLOAD" = true ]; then
-  printf "\n--- Downloading ERA5 data ---\n"
-
-  BASE_URL="https://cds.climate.copernicus.eu/api/retrieve/v1"
-  DATASETS=$(jq -r '.datasets | keys[]' "$CFG")
-  AREA=$(jq -c '.area' "$CFG")
-
-  START_DATE=$(jq -r '.date_start' "$CFG")
-  END_DATE=$(jq -r '.date_end' "$CFG")
+# --- Time of interest ----------------------------------------------------------
+START_DATE=$(jq -r '.date_start' "$CFG")
+END_DATE=$(jq -r '.date_end' "$CFG")
   
-  PERIODS=$(python3 <<EOF
-import json
+PERIODS=$(python3 <<EOF
 from datetime import datetime, timedelta
 import calendar
-
-with open("$CFG") as f:
-    config = json.load(f)
+import json
 
 d1 = datetime.strptime("$START_DATE", '%Y-%m-%d %H:%M:%S')
 d2 = datetime.strptime("$END_DATE", '%Y-%m-%d %H:%M:%S')
@@ -86,6 +76,14 @@ while curr <= end:
     curr = datetime(y, m + 1, 1)
 EOF
 )
+
+# --- 1. Download ERA5 data --------------------------------------------
+if [ "$DOWNLOAD" = true ]; then
+  printf "\n--- Downloading ERA5 data ---\n"
+
+  BASE_URL="https://cds.climate.copernicus.eu/api/retrieve/v1"
+  DATASETS=$(jq -r '.datasets | keys[]' "$CFG")
+  AREA=$(jq -c '.area' "$CFG")
   
   HOURS=$(seq -f "%02g:00" 0 23 | jq -R . | jq -s -c .)
 
@@ -208,18 +206,10 @@ else
 fi
 
 if [ "$CONVERT" = true ]; then
-# --- Verify GRIB files to ARL ----------------------------------------------
-  FILES=($(ls $DATA_DIR | grep .GRIB | awk -F '[_.]' '{print $2"_"$3}' | sort -u))
-
-  if [ -z "$FILES" ]; then
-    echo "[ERROR] No GRIB files found in $DATA_DIR"
-    exit 1
-  fi
-
   # --- 3. Convert GRIB Files to ARL ----------------------------------------------------
   FILES=($(ls $DATA_DIR | grep .GRIB | awk -F '[_.]' '{print $2"_"$3}' | sort -u))
 
-  if [ -z ${#FILES[@]} ]; then
+  if [ ${#FILES[@]} -eq 0 ]; then
     echo "[ERROR] No GRIB files found in $DATA_DIR"
     exit 1
   fi
@@ -256,53 +246,7 @@ if [ "$CONVERT" = true ]; then
   cd "$PROJECT_DIR"
 fi
 
-# --- 4. CONTROL ----------------------------------------------------------------
-printf "\n--- Setting up CONTROL file ---\n"
-CONTROL_SRC="$RUN_DIR/CONTROL"
-CONTROL_DST="$HYSPLIT_EXEC/CONTROL"
-
-START=$(jq '.date_start' "$CFG" | xargs -I {} date -d "{}" +"%Y %m %d %H")
-NUM_POINTS=$(jq '.control.points | length' "$CFG")
-
-START_SEC=$(jq -r '.date_start' "$CFG" | xargs -I {} date -d "{}" +%s)
-END_SEC=$(jq -r '.date_end' "$CFG" | xargs -I {} date -d "{}" +%s)
-DURATION=$(( ( $END_SEC - $START_SEC ) / 3600 ))
-
-VERT_METHOD=$(jq -r '.control.vertical_method' "$CFG")
-TOP_MODEL=$(jq -r '.control.top_model' "$CFG")
-MET_FILES=($(ls "$OUTPUT_DIR" | grep "MET_.*\.ARL"))
-NUM_MET=${#MET_FILES[@]}
-
-if [ $NUM_MET -eq 0 ]; then
-  printf "\n--- ERROR: No ARL files found in $OUTPUT_DIR ---\n"
-  exit 1
-fi
-
-{
-  echo "$START"
-  echo "$NUM_POINTS"
-  
-  for (( i=0; i<$NUM_POINTS; i++ )); do
-      jq -r ".control.points[$i] | \"\(.lat) \(.lon) \(.height)\"" "$CFG"
-  done
-  
-  echo "$DURATION"
-  echo "$VERT_METHOD"
-  echo "$TOP_MODEL"
-  echo "$NUM_MET"
-  
-  for f in "${MET_FILES[@]}"; do
-    echo "$OUTPUT_DIR/"
-    echo "$f"
-  done
-
-  echo "$OUTPUT_DIR/"
-  echo "traj_out.txt"
-} > "$CONTROL_SRC"
-
-printf "\n--- CONTROL file generated successfully ---\n"
-
-# --- 5. SETUP.CFG ----------------------------------------------------------------
+# --- 4. SETUP.CFG ----------------------------------------------------------------
 TCL_SRC="$PROJECT_DIR/build/hysplit/guicode/traj_cfg.tcl"
 OUTPUT_CFG="$RUN_DIR/SETUP.CFG"
 
@@ -330,6 +274,9 @@ if [[ -n "$ACTIVE_LABELS" ]]; then
   {
     echo "&SETUP"
 
+    RESTART=$(jq -r ".setup.restart_interval" "$CFG")
+    TSPAN=$(jq -r ".setup.trajectory_duration" "$CFG")
+
     sed -n '/proc reset_config/,/}/p' "$TCL_SRC" | grep "^set" | while read -r _ key val; do
       
       if [[ $key =~ ^(tset|delt)$ ]]; then
@@ -339,17 +286,136 @@ if [[ -n "$ACTIVE_LABELS" ]]; then
       if [[ $ACTIVE_VARS == *$key* ]]; then
         val=1
       fi 
-      echo $key=$val
+
+      if [[ $key == "nstr" && $RESTART -gt 0 ]]; then
+        val=$RESTART
+      fi
+
+      if [[ $key == "khmax" && $TSPAN -gt 0 ]]; then
+        val=$TSPAN
+      fi
+
+      echo $key = $val,
     done
 
     echo "/"
   } > "$OUTPUT_CFG"
 fi
 
-# --- 6. HYSPLIT ----------------------------------------------------------------
-printf "\n--- Executing HYSPLIT ---\n"
-cp "$RUN_DIR/SETUP.CFG" "$HYSPLIT_EXEC/"
-cp "$CONTROL_SRC" "$CONTROL_DST"
+# --- 5. CONTROL file and model execution ------------------------------------------------
 
-cd "$HYSPLIT_EXEC" && ./hyts_std
-printf "\n=== Simulation completed. Results saved in $OUTPUT_DIR ===\n"
+CONTROL_SRC="$RUN_DIR/CONTROL"
+CONTROL_DST="$HYSPLIT_EXEC/CONTROL"
+
+NUM_POINTS=$(jq '.setup.points | length' "$CFG")
+VERT_METHOD=$(jq -r '.setup.vertical_method' "$CFG")
+TOP_MODEL=$(jq -r '.setup.top_model' "$CFG")
+
+if [ $(date -d "$START_DATE" +%s) -gt $(date -d "$END_DATE" +%s) ]; then
+  DIRECTION=-1  
+else
+  DIRECTION=1 
+fi
+
+while IFS='|' read -r YEAR MONTH DAYS; do
+  
+  printf "\n--- Processing: $YEAR-$MONTH ---\n"
+
+  MET=$(python3 <<EOF
+import json
+from datetime import datetime, timedelta
+import os
+
+year = int("$YEAR")
+month = int("$MONTH")
+days = json.loads('$DAYS')  
+raw_tspan = int("$TSPAN") 
+direction = int("$DIRECTION")
+tspan = 0 if raw_tspan == 9999 else raw_tspan
+
+t_min = datetime(year, month, int(days[0]), 0, 0)
+t_max = datetime(year, month, int(days[-1]), 0, 0) + timedelta(days=1)
+hspan = int((t_max - t_min).total_seconds() / 3600)
+
+if direction == -1:
+  start = t_max
+  end = t_max - timedelta(hours=hspan + tspan)
+  start_time = t_max.strftime("%y %m %d %H")
+else:
+  start = t_min
+  end = t_min + timedelta(hours=hspan + tspan)
+  start_time = t_min.strftime("%y %m %d %H")
+
+duration = direction * (hspan + tspan)
+start, end = min(start, end), max(start, end)
+
+files = []
+current = datetime(start.year, start.month, 1)
+target  = datetime(end.year, end.month, 1)
+
+while current <= target:
+  files.append(f"MET_{current.year}_{current.month:02d}.ARL")
+  if current.month == 12:
+    current = datetime(current.year + 1, 1, 1)
+  else:
+    current = datetime(current.year, current.month + 1, 1)
+
+output = {
+  "start_time": start_time,
+  "duration": duration,
+  "files": files
+}
+print(json.dumps(output))
+EOF
+)
+  START=$(echo "$MET" | jq -r '.start_time')
+  DURATION=$(echo "$MET" | jq -r '.duration')
+  NUM_MET=$(echo "$MET" | jq '.files | length')
+
+  MET_FILES=()
+  while read -r f; do
+    if [[ -n "$f" ]]; then
+      if [[ ! -f "$OUTPUT_DIR/$f" ]]; then
+        printf "[ERROR] Missing meteorological file: %s/%s\n" "$OUTPUT_DIR" "$f"
+        exit 1
+      fi
+      MET_FILES+=("$f")
+    fi
+  done < <(echo "$MET" | jq -r '.files[]')
+
+  {
+    echo "$START"
+    echo "$NUM_POINTS"
+    
+    for (( i=0; i<$NUM_POINTS; i++ )); do
+      jq -r ".setup.points[$i] | \"\(.lat) \(.lon) \(.height)\"" "$CFG"
+    done
+    
+    echo "$DURATION"
+    echo "$VERT_METHOD"
+    echo "$TOP_MODEL"
+    echo "$NUM_MET"
+    
+    for f in "${MET_FILES[@]}"; do
+      echo "$OUTPUT_DIR/"
+      echo "$f"
+    done
+
+    echo "$OUTPUT_DIR/"
+    echo "traj_out_${YEAR}_${MONTH}.txt"
+  } > "$CONTROL_SRC"
+
+  printf "[INFO] CONTROL file generated successfully \n"
+  printf "[INFO] Executing HYSPLIT \n"
+
+  cp "$RUN_DIR/SETUP.CFG" "$HYSPLIT_EXEC/"
+  cp "$CONTROL_SRC" "$CONTROL_DST"
+  
+  cd "$HYSPLIT_EXEC" && ./hyts_std
+  cd "$PROJECT_DIR"
+
+  printf "\n=== Simulation $YEAR-$MONTH completed. Results saved in $OUTPUT_DIR ===\n"
+
+done < <(echo "$PERIODS")
+
+printf "[INFO] All simulations completed successfully\n"
