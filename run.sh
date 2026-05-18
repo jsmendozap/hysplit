@@ -92,11 +92,9 @@ if [ "$DOWNLOAD" = true ]; then
     
     for key in $DATASETS; do
       PRODUCT=$(jq -r ".datasets.$key.name" "$CFG")
-      OUTFILE=$(jq -r \
-                  --arg k "$key" \
-                  --arg suffix "_${YEAR}_${MONTH}.GRIB" \
-                  '.datasets[$k].output + $suffix' "$CFG")
-
+      SUFFIX=$([[ "$key" == "pressure" ]] && echo "PRES" || echo "SFC")
+      OUTFILE="${SUFFIX}_${YEAR}_${MONTH}.GRIB"
+      
       if [ -f "$DATA_DIR/$OUTFILE" ]; then
         printf "\n[INFO] File already exists, skipping download: $OUTFILE"
         continue
@@ -226,8 +224,8 @@ if [ "$CONVERT" = true ]; then
     IFS='_' read -r year month <<< "$file"
     printf "processing file: $file (year: $year, month: $month)\n"
 
-    PRES_FILE="$(jq -r '.datasets.pressure.output' "$CFG")_${year}_${month}.GRIB"
-    SURF_FILE="$(jq -r '.datasets.surface.output' "$CFG")_${year}_${month}.GRIB"
+    PRES_FILE="PRES_${year}_${month}.GRIB"
+    SURF_FILE="SFC_${year}_${month}.GRIB"
     OUT_FILE="MET_${file}.ARL"
 
     if [ -f "$DATA_DIR/$OUT_FILE" ]; then
@@ -256,30 +254,10 @@ fi
 # --- 4. SETUP.CFG ----------------------------------------------------------------
 TCL_SRC="$PROJECT_DIR/build/hysplit/guicode/traj_cfg.tcl"
 OUTPUT_CFG="$RUN_DIR/SETUP.CFG"
+OUTPUT_VARS=$(jq '.output | length' "$CFG")
 
-ACTIVE_LABELS=$(jq -r '.output | to_entries | .[] | select(.value > 0) | .key' "$CFG")
-RESTART=$(jq -r ".setup.restart_interval" "$CFG")
-TSPAN=$(jq -r ".setup.trajectory_duration" "$CFG")
-
-if [[ -n "$ACTIVE_LABELS" || "$TSPAN" -ne 9999 || "$RESTART" -gt 0 ]]; then
-  declare -A MAP
-  while read -r line; do
-    LABEL=$(echo "$line" |  awk -F '"' '{print $2}' | xargs)
-    VAR=$(echo "$line" | awk -F '-variable' '{print $2}' | xargs)
-    
-    if [[ -n "$LABEL" && -n "$VAR" ]]; then
-      MAP["$LABEL"]="$VAR"
-    fi
-  done < <(grep "checkbutton" "$TCL_SRC")
-
-  ACTIVE_VARS=""
-  for label in "${!MAP[@]}"; do
-    VAL=$(jq -r ".output[\"$label\"]" "$CFG")
-    if [[ "$VAL" -eq 1 ]]; then
-      ACTIVE_VARS="${ACTIVE_VARS} ${MAP[$label]}"
-    fi
-  done
-
+if [[ $OUTPUT_VARS -gt 0 ]]; then
+  ACTIVE_VARS=" $(jq -r '.output | join(" ")' "$CFG") "
   {
     echo "&SETUP"
 
@@ -289,18 +267,10 @@ if [[ -n "$ACTIVE_LABELS" || "$TSPAN" -ne 9999 || "$RESTART" -gt 0 ]]; then
         continue
       fi
 
-      if [[ $ACTIVE_VARS == *$key* ]]; then
+      if [[ $ACTIVE_VARS == *" $key "* ]]; then
         val=1
       fi 
-
-      if [[ $key == "nstr" && $RESTART -gt 0 ]]; then
-        val=$RESTART
-      fi
-
-      if [[ $key == "khmax" && $TSPAN -gt 0 ]]; then
-        val=$TSPAN
-      fi
-
+      
       echo $key = $val,
     done
 
@@ -308,14 +278,16 @@ if [[ -n "$ACTIVE_LABELS" || "$TSPAN" -ne 9999 || "$RESTART" -gt 0 ]]; then
   } > "$OUTPUT_CFG"
 fi
 
+
 # --- 5. CONTROL file and model execution ------------------------------------------------
 
 CONTROL_SRC="$RUN_DIR/CONTROL"
 CONTROL_DST="$HYSPLIT_EXEC/CONTROL"
 
-NUM_POINTS=$(jq '.setup.points | length' "$CFG")
-VERT_METHOD=$(jq -r '.setup.vertical_method' "$CFG")
-TOP_MODEL=$(jq -r '.setup.top_model' "$CFG")
+NUM_POINTS=$(jq '.control.points | length' "$CFG")
+VERT_METHOD=$(jq -r '.control.vertical_method' "$CFG")
+TOP_MODEL=$(jq -r '.control.top_model' "$CFG")
+TSPAN=$(jq -r '.setup.khmax // 0' "$CFG")
 
 if [ $(date -d "$START_DATE" +%s) -gt $(date -d "$END_DATE" +%s) ]; then
   DIRECTION=-1  
@@ -335,9 +307,8 @@ import os
 year = int("$YEAR")
 month = int("$MONTH")
 days = json.loads('$DAYS')  
-raw_tspan = int("$TSPAN") 
+tspan = int("$TSPAN") 
 direction = int("$DIRECTION")
-tspan = 0 if raw_tspan == 9999 else raw_tspan
 
 t_min = datetime(year, month, int(days[0]), 0, 0)
 t_max = datetime(year, month, int(days[-1]), 23, 0)
@@ -399,7 +370,7 @@ EOF
     echo "$NUM_POINTS"
     
     for (( i=0; i<$NUM_POINTS; i++ )); do
-      jq -r ".setup.points[$i] | \"\(.lat) \(.lon) \(.height)\"" "$CFG"
+      jq -r ".control.points[$i] | \"\(.lat) \(.lon) \(.height)\"" "$CFG"
     done
     
     echo "$DURATION"

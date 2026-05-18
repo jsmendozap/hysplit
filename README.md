@@ -79,3 +79,9 @@ After running the setup and run scripts, the project folder will mirror this str
 - **File Naming Conventions:** If the download phase is skipped (e.g., by manually providing pre-downloaded GRIB or ARL data inside the `data/` directory), the files **must** adhere to a strict naming pattern. Failing to match these patterns will result in execution errors:
   - **GRIB files:** Must be formatted as `<output_prefix>_YYYY_MM.GRIB` (e.g., `PRES_2025_01.GRIB`). The prefix must exactly match the output string defined for each dataset in the `config.json` file.
   - **ARL files:** Converted meteorological files must be formatted as `MET_YYYY_MM.ARL` (e.g., `MET_2025_01.ARL`).
+
+---
+
+## Credits
+
+The generation of the `era52arl.cfg` mappings relies on the `era5utils.py` script provided by the [hysplit_metdata repository](https://github.com/hysplit/hysplit_metdata).
