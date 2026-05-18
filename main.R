@@ -30,7 +30,7 @@ AOI <- st_bbox(c(xmin = -85, ymin = -25, xmax = -30, ymax = 15))
 TOP_MODEL <- 1500
 VERTICAL_METHOD <- 0
 SETUP <- list(nstr = 6, khmax = 240)
-OUTPUT_VARS <- "tm_sphu"
+OUTPUT_VARS <- list("tm_sphu")
 PRES_VARS <- "specific_humidity"
 SFC_VARS <- c(
   "boundary_layer_height",
