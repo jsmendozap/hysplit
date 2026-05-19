@@ -254,10 +254,16 @@ fi
 # --- 4. SETUP.CFG ----------------------------------------------------------------
 TCL_SRC="$PROJECT_DIR/build/hysplit/guicode/traj_cfg.tcl"
 OUTPUT_CFG="$RUN_DIR/SETUP.CFG"
-OUTPUT_VARS=$(jq '.output | length' "$CFG")
+ACTIVE_VARS=" $(jq -r 'try(.output | join(" ")) catch empty' "$CFG") "
 
-if [[ $OUTPUT_VARS -gt 0 ]]; then
-  ACTIVE_VARS=" $(jq -r '.output | join(" ")' "$CFG") "
+declare -A SETUP_VARS
+while read -r k v; do
+  if [[ -n "$k" ]]; then
+    SETUP_VARS["$k"]="$v"
+  fi
+done < <(jq -r 'try(.setup | to_entries[] | "\(.key) \(.value)") catch empty' "$CFG")
+
+if [[ -n $ACTIVE_VARS || ${#SETUP_VARS[@]} -gt 0 ]]; then
   {
     echo "&SETUP"
 
@@ -270,6 +276,10 @@ if [[ $OUTPUT_VARS -gt 0 ]]; then
       if [[ $ACTIVE_VARS == *" $key "* ]]; then
         val=1
       fi 
+
+      if [[ -n ${SETUP_VARS[$key]} ]]; then
+        val=${SETUP_VARS[$key]}
+      fi
       
       echo $key = $val,
     done
