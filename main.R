@@ -24,12 +24,12 @@ rm(col, amazonian, url)
 
 START_DATE <- "2026-02-05 00:00:00"
 END_DATE <- "2026-01-25 00:00:00"
+DURATION <- 240
 HEIGHTS <- c(300, 500, 1500)
 CONFIG_PATH <- "/Users/juan/Desktop/config.json"
 AOI <- st_bbox(c(xmin = -85, ymin = -25, xmax = -30, ymax = 15))
-TOP_MODEL <- 1500
+TOP_MODEL <- 10000
 VERTICAL_METHOD <- 0
-SETUP <- list(nstr = 6, khmax = 240)
 OUTPUT_VARS <- list("tm_sphu")
 PRES_VARS <- "specific_humidity"
 SFC_VARS <- c(
@@ -50,12 +50,12 @@ project_setup(
   path = CONFIG_PATH,
   date.start = START_DATE,
   date.end = END_DATE,
+  duration = DURATION,
   bbox = AOI,
   points = POINTS,
   top.model = TOP_MODEL,
   vertical.method = VERTICAL_METHOD,
   output.vars = OUTPUT_VARS,
   pres.vars = PRES_VARS,
-  sfc.vars = SFC_VARS,
-  setup = SETUP
+  sfc.vars = SFC_VARS
 )

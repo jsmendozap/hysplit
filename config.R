@@ -8,10 +8,12 @@ library(sf)
 #' @param path Character string. The file path where `config.json` will be saved.
 #' @param date.start Character string. The start date and time of the simulation.
 #' @param date.end Character string. The end date and time of the simulation.
+#' @param duration Numeric. The duration of the simulation in hours.
 #' @param bbox An object of class `bbox` (from `sf` package) defining the spatial bounding box for ERA5 data.
 #' @param points A `data.frame` with columns `lat`, `lon`, and `height` defining the receptor/emitter points.
 #' @param top.model Numeric. The top of the model domain (in meters).
 #' @param vertical.method Numeric. The vertical motion calculation method.
+#' @param interval.traj Numeric. The time interval (in hours) between injection of new trajectory points. Default is `24` (one day).
 #' @param download Logical. Whether to include the datasets section for downloading ERA5 data. Default is `TRUE`.
 #' @param pres.levels Numeric vector. The pressure levels to download. Default levels: from 100 to 1000 hPa.
 #' @param pres.vars Character vector. Additional pressure level variables to include. The basic variables required by the software for the GRIB to ARL conversion are automatically included by default, but additional variables can be added to the final file.
@@ -36,10 +38,12 @@ library(sf)
 project_setup <- function(path,
                           date.start,
                           date.end,
+                          duration,
                           bbox,
                           points,
                           top.model,
                           vertical.method,
+                          interval.traj = 24,
                           download = T,
                           pres.levels = c(seq(100, 250, 25), seq(300, 750, 50), seq(775, 1000, 25)),
                           pres.vars = NULL,
@@ -60,6 +64,8 @@ project_setup <- function(path,
   config <- list(
     date_start = date.start,
     date_end = date.end,
+    duration = duration,
+    interval_traj = interval.traj,
     area = c(bbox$ymax, bbox$xmin, bbox$ymin, bbox$xmax),
     control = list(
       vertical_method = vertical.method,

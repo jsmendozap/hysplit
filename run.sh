@@ -27,11 +27,27 @@ for arg in "$@"; do
   esac
 done
 
-# --- Time of interest ----------------------------------------------------------
+# --- 1. Download ERA5 data --------------------------------------------
 START_DATE=$(jq -r '.date_start' "$CFG")
 END_DATE=$(jq -r '.date_end' "$CFG")
-  
-PERIODS=$(python3 <<EOF
+
+if [ "$DOWNLOAD" = true ]; then
+
+  if [ -f "$PROJECT_DIR/.env" ]; then
+    export $(grep -v '^#' "$PROJECT_DIR/.env" | xargs)
+  else
+    echo "[ERROR] .env file not found in $PROJECT_DIR"
+    exit 1
+  fi
+
+  if [ -z "$KEY" ]; then
+    echo "[ERROR] The KEY variable is not defined in the .env file"
+    exit 1
+  fi
+
+  printf "\n--- Downloading ERA5 data ---\n"
+
+  PERIODS=$(python3 <<EOF
 from datetime import datetime, timedelta
 import calendar
 import json
@@ -63,23 +79,6 @@ while curr <= end:
     curr = datetime(y, m + 1, 1)
 EOF
 )
-
-# --- 1. Download ERA5 data --------------------------------------------
-if [ "$DOWNLOAD" = true ]; then
-
-  if [ -f "$PROJECT_DIR/.env" ]; then
-    export $(grep -v '^#' "$PROJECT_DIR/.env" | xargs)
-  else
-    echo "[ERROR] .env file not found in $PROJECT_DIR"
-    exit 1
-  fi
-
-  if [ -z "$KEY" ]; then
-    echo "[ERROR] The KEY variable is not defined in the .env file"
-    exit 1
-  fi
-
-  printf "\n--- Downloading ERA5 data ---\n"
 
   BASE_URL="https://cds.climate.copernicus.eu/api/retrieve/v1"
   DATASETS=$(jq -r '.datasets | keys[]' "$CFG")
@@ -209,9 +208,9 @@ else
   exit 1
 fi
 
+# --- 3. Convert GRIB Files to ARL ----------------------------------------------------
 if [ "$CONVERT" = true ]; then
-  # --- 3. Convert GRIB Files to ARL ----------------------------------------------------
-  FILES=($(ls $DATA_DIR | grep .GRIB | awk -F '[_.]' '{print $2"_"$3}' | sort -u))
+  FILES=($(ls $DATA_DIR | grep \.GRIB | awk -F '[_.]' '{print $2"_"$3}' | sort -u))
 
   if [ ${#FILES[@]} -eq 0 ]; then
     echo "[ERROR] No GRIB files found in $DATA_DIR"
@@ -286,104 +285,94 @@ if [[ -n $ACTIVE_VARS || ${#SETUP_VARS[@]} -gt 0 ]]; then
 
     echo "/"
   } > "$OUTPUT_CFG"
+  cp "$OUTPUT_CFG" "$HYSPLIT_EXEC/"
 fi
-
 
 # --- 5. CONTROL file and model execution ------------------------------------------------
 
 CONTROL_SRC="$RUN_DIR/CONTROL"
 CONTROL_DST="$HYSPLIT_EXEC/CONTROL"
 
-NUM_POINTS=$(jq '.control.points | length' "$CFG")
+POINTS=$(jq -r '.control.points[] | "\(.lat) \(.lon) \(.height)"' "$CFG")
+NUM_POINTS=$(echo "$POINTS" | wc -l)
 VERT_METHOD=$(jq -r '.control.vertical_method' "$CFG")
 TOP_MODEL=$(jq -r '.control.top_model' "$CFG")
-TSPAN=$(jq -r '.setup.khmax // 0' "$CFG")
+DURATION=$(jq -r '.duration' "$CFG")
+TR_INTERVAL=$(jq -r '.interval_traj // 24' "$CFG")
 
-if [ $(date -d "$START_DATE" +%s) -gt $(date -d "$END_DATE" +%s) ]; then
-  DIRECTION=-1  
+T_START=$(date -u -d "$START_DATE" +%s)
+T_END=$(date -u -d "$END_DATE" +%s)
+
+if [[ $T_START -gt $T_END ]]; then
+  DIRECTION=-1
+  LOWER=$T_END
+  UPPER=$T_START
 else
-  DIRECTION=1 
+  DIRECTION=1
+  LOWER=$T_START
+  UPPER=$T_END
 fi
 
-while IFS='|' read -r YEAR MONTH DAYS; do
-  
-  printf "\n--- Processing: $YEAR-$MONTH ---\n"
+if [[ $DIRECTION -eq -1 ]]; then
+  MIN_VALID_LAUNCH=$(( LOWER + (DURATION * 3600) ))
+  if [[ $LOWER -lt $MIN_VALID_LAUNCH ]]; then
+    LOWER=$MIN_VALID_LAUNCH
+    printf "[INFO] Duration exceeds valid range. New end date: %s\n" "$(date -u -d "@$LOWER" +'%Y-%m-%d %H:%M:%S')"
+  fi
+else
+  MAX_VALID_LAUNCH=$(( UPPER - (DURATION * 3600) ))
+  if [[ $UPPER -gt $MAX_VALID_LAUNCH ]]; then
+    UPPER=$MAX_VALID_LAUNCH
+    printf "[INFO] Duration exceeds valid range. New start date: %s\n" "$(date -u -d "@$UPPER" +'%Y-%m-%d %H:%M:%S')"
+  fi
+fi
 
-  MET=$(python3 <<EOF
-import json
-from datetime import datetime, timedelta
-import os
+for (( current=LOWER; current<=UPPER; current+=$((TR_INTERVAL * 3600)) )); do  
+  TIME="$(date -u -d "@$current" +'%Y_%m_%d_%H')"
+  END_SEC=$(( current + (DIRECTION * DURATION * 3600) ))
 
-year = int("$YEAR")
-month = int("$MONTH")
-days = json.loads('$DAYS')  
-tspan = int("$TSPAN") 
-direction = int("$DIRECTION")
+  if [[ $current -lt $END_SEC ]]; then
+    SIM_START=$current
+    SIM_END=$END_SEC
+  else
+    SIM_START=$END_SEC
+    SIM_END=$current
+  fi
 
-t_min = datetime(year, month, int(days[0]), 0, 0)
-t_max = datetime(year, month, int(days[-1]), 23, 0)
+  Y_CURR=$(date -u -d "@$SIM_START" +%Y)
+  M_CURR=$(( 10#$(date -u -d "@$SIM_START" +%m) ))
+  Y_END=$(date -u -d "@$SIM_END" +%Y)
+  M_END=$(( 10#$(date -u -d "@$SIM_END" +%m) ))
 
-g_dates = [datetime.strptime("$START_DATE", "%Y-%m-%d %H:%M:%S"), datetime.strptime("$END_DATE", "%Y-%m-%d %H:%M:%S")]
-t_min = max(t_min, min(g_dates))
-t_max = min(t_max, max(g_dates))
+  MET_STRING=""
 
-hspan = int((t_max - t_min).total_seconds() / 3600)
+  while [[ $Y_CURR -lt $Y_END || ( $Y_CURR -eq $Y_END && $M_CURR -le $M_END ) ]]; do
+    printf -v MM "%02d" $M_CURR
+    MET_STRING+="MET_${Y_CURR}_${MM}.ARL "
+    
+    ((M_CURR++))
+    if (( M_CURR > 12 )); then
+      M_CURR=1
+      ((Y_CURR++))
+    fi
+  done
 
-if direction == -1:
-  start = t_max
-  end = t_max - timedelta(hours=hspan + tspan)
-  start_time = t_max.strftime("%y %m %d %H")
-else:
-  start = t_min
-  end = t_min + timedelta(hours=hspan + tspan)
-  start_time = t_min.strftime("%y %m %d %H")
-
-duration = direction * (hspan + tspan)
-start, end = min(start, end), max(start, end)
-
-files = []
-current = datetime(start.year, start.month, 1)
-target  = datetime(end.year, end.month, 1)
-
-while current <= target:
-  files.append(f"MET_{current.year}_{current.month:02d}.ARL")
-  if current.month == 12:
-    current = datetime(current.year + 1, 1, 1)
-  else:
-    current = datetime(current.year, current.month + 1, 1)
-
-output = {
-  "start_time": start_time,
-  "duration": duration,
-  "files": files
-}
-print(json.dumps(output))
-EOF
-)
-  START=$(echo "$MET" | jq -r '.start_time')
-  DURATION=$(echo "$MET" | jq -r '.duration')
-  NUM_MET=$(echo "$MET" | jq '.files | length')
+  NUM_MET=$(echo "$MET_STRING" | wc -w)
 
   MET_FILES=()
-  while read -r f; do
-    if [[ -n "$f" ]]; then
-      if [[ ! -f "$DATA_DIR/$f" ]]; then
-        printf "[ERROR] Missing meteorological file: %s/%s\n" "$DATA_DIR" "$f"
-        exit 1
-      fi
-      MET_FILES+=("$f")
+  for f in $MET_STRING; do
+    if [[ ! -f "$DATA_DIR/$f" ]]; then
+      printf "[ERROR] File not found: %s/%s\n" "$DATA_DIR" "$f"
+      exit 1
     fi
-  done < <(echo "$MET" | jq -r '.files[]')
+    MET_FILES+=("$f")
+  done
 
   {
-    echo "$START"
+    echo "$(date -u -d "@$current" +'%y %m %d %H')"
     echo "$NUM_POINTS"
-    
-    for (( i=0; i<$NUM_POINTS; i++ )); do
-      jq -r ".control.points[$i] | \"\(.lat) \(.lon) \(.height)\"" "$CFG"
-    done
-    
-    echo "$DURATION"
+    echo "$POINTS"
+    echo "$(( $DIRECTION * $DURATION ))"
     echo "$VERT_METHOD"
     echo "$TOP_MODEL"
     echo "$NUM_MET"
@@ -394,20 +383,16 @@ EOF
     done
 
     echo "$OUTPUT_DIR/"
-    echo "traj_out_${YEAR}_${MONTH}.txt"
+    echo "traj_${TIME}.txt"
   } > "$CONTROL_SRC"
 
-  printf "[INFO] CONTROL file generated successfully \n"
-  printf "[INFO] Executing HYSPLIT \n"
+  printf "[INFO] Executing HYSPLIT for $(date -u -d "@$current" +'%Y-%m-%d %H:%M:%S')\n"
 
-  cp "$RUN_DIR/SETUP.CFG" "$HYSPLIT_EXEC/"
   cp "$CONTROL_SRC" "$CONTROL_DST"
-  
-  cd "$HYSPLIT_EXEC" && ./hyts_std
+  cd "$HYSPLIT_EXEC" && ./hyts_std > "output.log" 2>&1
+  mv "output.log" "$RUN_DIR/output.log"
   cd "$PROJECT_DIR"
 
-  printf "\n=== Simulation $YEAR-$MONTH completed. Results saved in $OUTPUT_DIR ===\n"
+done
 
-done < <(echo "$PERIODS")
-
-printf "[INFO] All simulations completed successfully\n"
+printf "[OK] All simulations completed successfully\n"
