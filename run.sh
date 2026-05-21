@@ -31,6 +31,34 @@ done
 START_DATE=$(jq -r '.date_start' "$CFG")
 END_DATE=$(jq -r '.date_end' "$CFG")
 
+DURATION=$(jq -r '.duration' "$CFG")
+T_START=$(date -u -d "$START_DATE" +%s)
+T_END=$(date -u -d "$END_DATE" +%s)
+
+if [[ $T_START -gt $T_END ]]; then
+  DIRECTION=-1
+  SIM_LOWER=$T_END
+  SIM_UPPER=$T_START
+else
+  DIRECTION=1
+  SIM_LOWER=$T_START
+  SIM_UPPER=$T_END
+fi
+
+if [[ $DIRECTION -eq -1 ]]; then
+  MET_LOWER=$(( SIM_LOWER - (DURATION * 3600) ))
+  MET_UPPER=$SIM_UPPER
+else
+  MET_LOWER=$SIM_LOWER
+  MET_UPPER=$(( SIM_UPPER + (DURATION * 3600) ))
+fi
+
+MET_START_DATE=$(date -u -d "@$MET_LOWER" +'%Y-%m-%d %H:%M:%S')
+MET_END_DATE=$(date -u -d "@$MET_UPPER" +'%Y-%m-%d %H:%M:%S')
+
+printf "[INFO] Simulation window: %s to %s\n" "$(date -u -d "@$SIM_LOWER" +'%Y-%m-%d %H:%M:%S')" "$(date -u -d "@$SIM_UPPER" +'%Y-%m-%d %H:%M:%S')"
+printf "[INFO] Data window required: %s to %s\n" "$MET_START_DATE" "$MET_END_DATE"
+
 if [ "$DOWNLOAD" = true ]; then
 
   if [ -f "$PROJECT_DIR/.env" ]; then
@@ -52,27 +80,32 @@ from datetime import datetime, timedelta
 import calendar
 import json
 
-d1 = datetime.strptime("$START_DATE", '%Y-%m-%d %H:%M:%S')
-d2 = datetime.strptime("$END_DATE", '%Y-%m-%d %H:%M:%S')
-start, end = min(d1, d2), max(d1, d2)
+start = datetime.strptime("$MET_START_DATE", '%Y-%m-%d %H:%M:%S')
+end = datetime.strptime("$MET_END_DATE", '%Y-%m-%d %H:%M:%S')
 
 curr = start
+chunk_size = 11
+
 while curr <= end:
   y, m = curr.year, curr.month
-  
   if y == start.year and m == start.month:
     s_day = start.day
   else:
     s_day = 1
-      
+    
   if y == end.year and m == end.month:
     e_day = end.day
   else:
     e_day = calendar.monthrange(y, m)[1]
+    
+  days = [f"{d:02d}" for d in range(s_day, e_day + 1)]
+  days = [days[i:i + chunk_size] for i in range(0, len(days), chunk_size)]
   
-  days = [f"{d:02d}" for d in range(s_day, e_day + 1)]    
-  print(f"{y}|{m:02d}|{json.dumps(days)}")
-  
+  for chunk in range(0, len(days)): 
+    n_chunks = len(days)
+    dates = days[chunk]
+    print(f"{y}|{m:02d}|{chunk + 1}|{n_chunks}|{json.dumps(dates)}")
+
   if m == 12:
     curr = datetime(y + 1, 1, 1)
   else:
@@ -86,13 +119,13 @@ EOF
   
   HOURS=$(seq -f "%02g:00" 0 23 | jq -R . | jq -s -c .)
 
-  echo "$PERIODS" | while IFS='|' read -r YEAR MONTH DAYS; do
-    printf "[INFO] Processing period: $YEAR-$MONTH \n"
-    
+  echo "$PERIODS" | while IFS='|' read -r YEAR MONTH CHUNK N_CHUNKS DAYS; do
+    printf "[INFO] Processing period: $YEAR-$MONTH (part ${CHUNK}/${N_CHUNKS})\n"
+
     for key in $DATASETS; do
       PRODUCT=$(jq -r ".datasets.$key.name" "$CFG")
       SUFFIX=$([[ "$key" == "pressure" ]] && echo "PRES" || echo "SFC")
-      OUTFILE="${SUFFIX}_${YEAR}_${MONTH}.GRIB"
+      OUTFILE="${SUFFIX}_${YEAR}_${MONTH}_${CHUNK}_${N_CHUNKS}.GRIB"
       
       if [ -f "$DATA_DIR/$OUTFILE" ]; then
         printf "\n[INFO] File already exists, skipping download: $OUTFILE"
@@ -133,12 +166,17 @@ EOF
         -H "accept: application/json" \
         -H "PRIVATE-TOKEN: $KEY" | jq -r '.status')
 
-        printf "[$PRODUCT] Status: $STATUS\n"
+        printf "[%s] Status: %s\033[0K\n" "$PRODUCT" "$STATUS"
 
         [ "$STATUS" = "successful" ] && break
         [ "$STATUS" = "failed" ]     && echo "[ERROR] Job $PRODUCT failed: $JOB_ID" && exit 1
 
-        sleep 300 
+        secs=300
+        while (( secs > 0 )); do
+          printf "Retry download in %02d:%02d\033[0K\r" $((secs / 60)) $((secs % 60))
+          sleep 1
+          ((secs--))
+        done
       done
 
       DOWNLOAD_URL=$(curl -X 'GET' \
@@ -146,6 +184,8 @@ EOF
         -H "accept: application/json" \
         -H "PRIVATE-TOKEN: $KEY" \
         | jq -r '.asset.value.href')
+
+      printf "\n"
 
       curl -L --progress-bar \
         -H "PRIVATE-TOKEN: $KEY" \
@@ -158,7 +198,7 @@ EOF
         -H 'accept: application/json' \
         -H "PRIVATE-TOKEN: $KEY"
 
-      echo "[OK] $OUTFILE downloaded successfully"
+      printf "[OK] $OUTFILE downloaded successfully \n"
     done
   done
 fi
@@ -178,11 +218,11 @@ sys.path.append("$PROJECT_DIR/build")
 import era5utils
 
 with open("$CFG") as f: 
-    config = json.load(f)
+  config = json.load(f)
 
 sname = era5utils.getvars()
 var3d = {v[4]: k for k,v in sname.items() if len(v) >= 4 and v[4] and k != 'SHGT'}
-var2d = {v[4]: k for k,v in sname.items() if len(v) >= 4 and v[4] and k != 'HGST'}
+var2d = {v[4]: k for k,v in sname.items() if len(v) >= 4 and v[4] and k != 'HGTS'}
 
 pl_vars = config.get("datasets").get("pressure").get("variables")
 param3d = [var3d[x] for x in pl_vars if x in var3d]
@@ -202,7 +242,7 @@ EOF
 
 if [ -f "$PROJECT_DIR/era52arl.cfg" ]; then
   mv "$PROJECT_DIR/era52arl.cfg" "$RUN_DIR/era52arl.cfg"
-  echo "[OK] era52arl.cfg saved in $RUN_DIR"
+  printf "[OK] era52arl.cfg saved in $RUN_DIR \n"
 else
   echo "[ERROR] Failed to write era52arl.cfg"
   exit 1
@@ -210,22 +250,22 @@ fi
 
 # --- 3. Convert GRIB Files to ARL ----------------------------------------------------
 if [ "$CONVERT" = true ]; then
-  FILES=($(ls $DATA_DIR | grep \.GRIB | awk -F '[_.]' '{print $2"_"$3}' | sort -u))
+  FILES=( $(ls $DATA_DIR | grep -i \.grib$ | cut -d'_' -f2- | sort -u | sed 's/\.grib$//I') )
 
   if [ ${#FILES[@]} -eq 0 ]; then
     echo "[ERROR] No GRIB files found in $DATA_DIR"
     exit 1
   fi
 
-  printf "\n--- Converting GRIB files to ARL---\n"
+  printf "\n--- Starting conversion of GRIB files to ARL---\n"
 
   for file in "${FILES[@]}"; do
-    IFS='_' read -r year month <<< "$file"
-    printf "processing file: $file (year: $year, month: $month)\n"
+    IFS='_' read -r year month chunk n_chunks <<< "$file"
+    printf "[INFO] Processing year: $year, month: $month, chunk: $chunk/$n_chunks\n"
 
-    PRES_FILE="PRES_${year}_${month}.GRIB"
-    SURF_FILE="SFC_${year}_${month}.GRIB"
-    OUT_FILE="MET_${file}.ARL"
+    PRES_FILE="PRES_${year}_${month}_${chunk}_${n_chunks}.GRIB"
+    SURF_FILE="SFC_${year}_${month}_${chunk}_${n_chunks}.GRIB"
+    OUT_FILE="MET_${year}_${month}_${chunk}_${n_chunks}.ARL"
 
     if [ -f "$DATA_DIR/$OUT_FILE" ]; then
       printf "[INFO] $OUT_FILE already exists, skipping conversion\n"
@@ -297,37 +337,9 @@ POINTS=$(jq -r '.control.points[] | "\(.lat) \(.lon) \(.height)"' "$CFG")
 NUM_POINTS=$(echo "$POINTS" | wc -l)
 VERT_METHOD=$(jq -r '.control.vertical_method' "$CFG")
 TOP_MODEL=$(jq -r '.control.top_model' "$CFG")
-DURATION=$(jq -r '.duration' "$CFG")
 TR_INTERVAL=$(jq -r '.interval_traj // 24' "$CFG")
 
-T_START=$(date -u -d "$START_DATE" +%s)
-T_END=$(date -u -d "$END_DATE" +%s)
-
-if [[ $T_START -gt $T_END ]]; then
-  DIRECTION=-1
-  LOWER=$T_END
-  UPPER=$T_START
-else
-  DIRECTION=1
-  LOWER=$T_START
-  UPPER=$T_END
-fi
-
-if [[ $DIRECTION -eq -1 ]]; then
-  MIN_VALID_LAUNCH=$(( LOWER + (DURATION * 3600) ))
-  if [[ $LOWER -lt $MIN_VALID_LAUNCH ]]; then
-    LOWER=$MIN_VALID_LAUNCH
-    printf "[INFO] Duration exceeds valid range. New end date: %s\n" "$(date -u -d "@$LOWER" +'%Y-%m-%d %H:%M:%S')"
-  fi
-else
-  MAX_VALID_LAUNCH=$(( UPPER - (DURATION * 3600) ))
-  if [[ $UPPER -gt $MAX_VALID_LAUNCH ]]; then
-    UPPER=$MAX_VALID_LAUNCH
-    printf "[INFO] Duration exceeds valid range. New start date: %s\n" "$(date -u -d "@$UPPER" +'%Y-%m-%d %H:%M:%S')"
-  fi
-fi
-
-for (( current=LOWER; current<=UPPER; current+=$((TR_INTERVAL * 3600)) )); do  
+for (( current=SIM_LOWER; current<=SIM_UPPER; current+=$((TR_INTERVAL * 3600)) )); do  
   TIME="$(date -u -d "@$current" +'%Y_%m_%d_%H')"
   END_SEC=$(( current + (DIRECTION * DURATION * 3600) ))
 
@@ -348,7 +360,17 @@ for (( current=LOWER; current<=UPPER; current+=$((TR_INTERVAL * 3600)) )); do
 
   while [[ $Y_CURR -lt $Y_END || ( $Y_CURR -eq $Y_END && $M_CURR -le $M_END ) ]]; do
     printf -v MM "%02d" $M_CURR
-    MET_STRING+="MET_${Y_CURR}_${MM}.ARL "
+    
+    AVAILABLE_CHUNKS=$(find "$DATA_DIR" -maxdepth 1 -name "MET_${Y_CURR}_${MM}_*.ARL" -printf "%f\n" 2>/dev/null | sort -V)
+    
+    if [[ -z "$AVAILABLE_CHUNKS" ]]; then
+      printf "[ERROR] No ARL files found for %s-%s\n" "$Y_CURR" "$MM"
+      exit 1
+    fi
+
+    for chunk in $AVAILABLE_CHUNKS; do
+      MET_STRING+="$chunk "
+    done
     
     ((M_CURR++))
     if (( M_CURR > 12 )); then
@@ -390,7 +412,7 @@ for (( current=LOWER; current<=UPPER; current+=$((TR_INTERVAL * 3600)) )); do
 
   cp "$CONTROL_SRC" "$CONTROL_DST"
   cd "$HYSPLIT_EXEC" && ./hyts_std > "output.log" 2>&1
-  mv "output.log" "$RUN_DIR/output.log"
+  mv "output.log" "$RUN_DIR/log/output_${TIME}.log"
   cd "$PROJECT_DIR"
 
 done

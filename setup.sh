@@ -35,7 +35,7 @@ TARBALLS_DIR="$PROJECT_DIR/tarballs"
 RUN_DIR="$PROJECT_DIR/run"
 
 # --- Create project structure ------------------------------------------------
-mkdir -p "$DEPS_DIR" "$BUILD_DIR" "$OUTPUT_DIR" "$DATA_DIR" "$TARBALLS_DIR" "$RUN_DIR"
+mkdir -p "$DEPS_DIR" "$BUILD_DIR" "$OUTPUT_DIR" "$DATA_DIR" "$TARBALLS_DIR" "$RUN_DIR" "$RUN_DIR/log"
 
 
 # --- Functions ---------------------------------------------------------------

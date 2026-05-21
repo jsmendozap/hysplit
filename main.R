@@ -25,11 +25,13 @@ rm(col, amazonian, url)
 START_DATE <- "2026-02-05 00:00:00"
 END_DATE <- "2026-01-25 00:00:00"
 DURATION <- 240
+N <- 100
 HEIGHTS <- c(300, 500, 1500)
 CONFIG_PATH <- "/Users/juan/Desktop/config.json"
 AOI <- st_bbox(c(xmin = -85, ymin = -25, xmax = -30, ymax = 15))
 TOP_MODEL <- 10000
 VERTICAL_METHOD <- 0
+INTERVAL_TRAJ <- 6
 OUTPUT_VARS <- list("tm_sphu")
 PRES_VARS <- "specific_humidity"
 SFC_VARS <- c(
@@ -40,7 +42,7 @@ SFC_VARS <- c(
   "surface_pressure"
 )
 
-POINTS <- st_sample(x = amazonian_col, type = "random", size = 100) %>%
+POINTS <- st_sample(x = amazonian_col, type = "random", size = N) %>%
   st_coordinates() %>%
   as.data.frame() %>%
   crossing(height = HEIGHTS) %>%
@@ -55,6 +57,7 @@ project_setup(
   points = POINTS,
   top.model = TOP_MODEL,
   vertical.method = VERTICAL_METHOD,
+  interval.traj = INTERVAL_TRAJ,
   output.vars = OUTPUT_VARS,
   pres.vars = PRES_VARS,
   sfc.vars = SFC_VARS
